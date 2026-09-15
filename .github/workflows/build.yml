@@ -110,6 +110,5 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "DevBuild $RELEASE_TAG" \
             --notes "Official Vencord commit: $UPSTREAM_SHA" \
-            --prerelease
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
