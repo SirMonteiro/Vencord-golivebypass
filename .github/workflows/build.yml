@@ -47,6 +47,12 @@ jobs:
         if: steps.check.outputs.should_build == 'true'
         run: git clone --depth 1 https://github.com/Vendicated/Vencord.git .
 
+      - name: Checkout repository
+        if: steps.check.outputs.should_build == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: current-repo
+
       - name: Download and inject GoLiveBypass plugin
         if: steps.check.outputs.should_build == 'true'
         run: |
@@ -59,6 +65,12 @@ jobs:
             mv tmp_plugin src/userplugins/goLiveBypass
           fi
           rm -rf golive.zip tmp_plugin
+
+      - name: Inject BroadcastBoxScreenShare plugin
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          cp -r current-repo/BroadcastBoxScreenShare src/userplugins/
+          rm -rf current-repo
 
       - name: Setup pnpm
         if: steps.check.outputs.should_build == 'true'
