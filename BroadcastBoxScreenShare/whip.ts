@@ -6,7 +6,7 @@
 
 import { Logger } from "@utils/Logger";
 
-import { getDiscordEncodeCodecs, orderVideoCodecsLikeDiscord } from "./discordCodecs";
+import { orderVideoCodecs, resolveCodecPolicy } from "./discordCodecs";
 import { applySenderQuality } from "./senderQuality";
 import { StreamQuality } from "./streamQuality";
 import { WhipSession } from "./types";
@@ -198,14 +198,23 @@ function removeSavedSessionUrl(token: string): void {
     } catch {}
 }
 
+export interface PublishOptions {
+    onCreated?: (pc: RTCPeerConnection) => void;
+    signal?: AbortSignal;
+    /** Discord Go Live quality to mirror on the outgoing RTP encoding. */
+    quality?: StreamQuality | null;
+    /** Experimental: force AV1 to the front of codec negotiation. */
+    forceAv1First?: boolean;
+}
+
 export async function publish(
     whipUrl: string,
     token: string,
     track: MediaStreamTrack,
-    onCreated?: (pc: RTCPeerConnection) => void,
-    signal?: AbortSignal,
-    quality?: StreamQuality | null
+    options: PublishOptions = {}
 ): Promise<WhipSession> {
+    const { onCreated, signal, quality, forceAv1First } = options;
+
     if (signal?.aborted) {
         throw new DOMException("Aborted", "AbortError");
     }
@@ -294,7 +303,7 @@ export async function publish(
 
     // Explicit sendonly video-only transceiver — correct WHIP semantics.
     const transceiver = pc.addTransceiver(track, { direction: "sendonly" });
-    await applyCodecPreferences(transceiver, "WHIP");
+    await applyCodecPreferences(transceiver, "WHIP", { quality, forceAv1First });
 
     logger.debug(`[WHIP] [${token}] Creating SDP offer...`);
     const offer = await pc.createOffer();
@@ -333,17 +342,16 @@ export async function publish(
 }
 
 /**
- * Applies Discord-compatible codec ordering.
+ * Applies the resolved codec policy to a transceiver.
  *
- * The browser exposes every codec it can decode, but Discord's native Go Live
- * encoder chooses H264 first and VP8 as the compatibility fallback. We mirror
- * that order (and use Discord's own encode-capability report when available)
- * instead of forcing AV1, which neither Discord's official path nor Broadcast
- * Box handles reliably.
+ * The policy prefers VP9 when the platform can encode it in hardware, otherwise
+ * promotes the first codec this platform supports. AV1 is forced last unless
+ * the experimental forceAv1First setting is enabled.
  */
 async function applyCodecPreferences(
     transceiver: RTCRtpTransceiver,
-    protocol: "WHIP" | "WHEP"
+    protocol: "WHIP" | "WHEP",
+    options: { quality?: StreamQuality | null; forceAv1First?: boolean; } = {}
 ): Promise<void> {
     if (typeof transceiver.setCodecPreferences !== "function") return;
 
@@ -358,12 +366,16 @@ async function applyCodecPreferences(
     if (!capabilities?.codecs?.length) return;
 
     try {
-        const discordCodecs = await getDiscordEncodeCodecs();
-        const ordered = orderVideoCodecsLikeDiscord(capabilities.codecs, discordCodecs);
+        const policy = await resolveCodecPolicy({
+            quality: options.quality,
+            forceAv1First: options.forceAv1First
+        });
+        const ordered = orderVideoCodecs(capabilities.codecs, policy);
 
         transceiver.setCodecPreferences(ordered);
         logger.debug(
-            `[${protocol}] Configured Discord-style codec order: ${ordered.map(codec => codec.mimeType).join(", ")}`
+            `[${protocol}] Configured codec order (${policy.source}, ` +
+            `vp9Hardware=${policy.vp9Hardware}): ${ordered.map(codec => codec.mimeType).join(", ")}`
         );
     } catch (err) {
         logger.warn(`[${protocol}] Failed to set codec preferences:`, err);

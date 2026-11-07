@@ -24,6 +24,11 @@ const settings = definePluginSettings({
         type: OptionType.STRING,
         description: "Broadcast Box base URL (no trailing slash)",
         default: "https://stream.gabrielsouza.top"
+    },
+    forceAv1First: {
+        type: OptionType.BOOLEAN,
+        description: "Experimental: force AV1 to the front of codec negotiation (off by default)",
+        default: false
     }
 });
 
@@ -125,19 +130,17 @@ class PublisherManager {
         logger.log(`Starting ${kind} publish session #${sessionId} to ${endpoint} with token: ${token} (streamId: ${streamId})`);
 
         try {
-            const session = await publish(
-                endpoint,
-                token,
-                track,
-                createdPc => {
+            const session = await publish(endpoint, token, track, {
+                onCreated: createdPc => {
                     pcToAbort = createdPc;
                     if (abortController.signal.aborted) {
                         try { createdPc.close(); } catch {}
                     }
                 },
-                abortController.signal,
-                quality
-            );
+                signal: abortController.signal,
+                quality,
+                forceAv1First: settings.store.forceAv1First
+            });
 
             if (abortController.signal.aborted) {
                 logger.log(`Session #${sessionId} was aborted during connection, closing.`);
