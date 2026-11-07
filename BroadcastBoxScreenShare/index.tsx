@@ -1,18 +1,21 @@
 /*
  * Vencord, a Discord client mod
+ * Copyright (c) 2026 Gabriel Monteiro de Souza
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { FluxDispatcher, UserStore, MediaEngineStore, VoiceStateStore } from "@webpack/common";
-import { findByProps, wreq } from "@webpack";
 import { definePluginSettings } from "@api/Settings";
-import definePlugin, { OptionType } from "@utils/types";
 import { Logger } from "@utils/Logger";
+import definePlugin, { OptionType } from "@utils/types";
+import { findByProps, wreq } from "@webpack";
+import { FluxDispatcher, MediaEngineStore, UserStore, VoiceStateStore } from "@webpack/common";
 
-import { StreamKind, WhipSession } from "./types";
-import { publish } from "./whip";
+import { applySenderQuality } from "./senderQuality";
+import { mergeQuality, qualityFromGoLiveSource, qualityFromTrack, StreamQuality } from "./streamQuality";
 import { StreamWatcher } from "./StreamWatcher";
+import { StreamKind, WhipSession } from "./types";
 import { whepSubscriptionManager } from "./WhepSubscriptionManager";
+import { publish } from "./whip";
 
 const logger = new Logger("WhipRelay", "#e5a00d");
 
@@ -55,7 +58,12 @@ class PublisherManager {
         return this.active.has(kind) || this.pending.has(kind);
     }
 
-    public async start(kind: StreamKind, track: MediaStreamTrack, streamId?: string | number): Promise<void> {
+    public async start(
+        kind: StreamKind,
+        track: MediaStreamTrack,
+        streamId?: string | number,
+        quality?: StreamQuality | null
+    ): Promise<void> {
         if (this.isCurrent(kind, streamId, track.id)) {
             logger.debug(`${kind} is already running track ${track.id} for streamId ${streamId}.`);
             return;
@@ -69,6 +77,7 @@ class PublisherManager {
                 try {
                     logger.log(`Replacing track on active ${kind} WebRTC session with new track id=${track.id} (streamId: ${streamId})`);
                     await sender.replaceTrack(track);
+                    await applySenderQuality(sender, track, quality);
                     this.currentTrackId.set(kind, track.id);
                     if (streamId != null) this.currentStreamId.set(kind, streamId);
                     return;
@@ -120,13 +129,14 @@ class PublisherManager {
                 endpoint,
                 token,
                 track,
-                (createdPc) => {
+                createdPc => {
                     pcToAbort = createdPc;
                     if (abortController.signal.aborted) {
                         try { createdPc.close(); } catch {}
                     }
                 },
-                abortController.signal
+                abortController.signal,
+                quality
             );
 
             if (abortController.signal.aborted) {
@@ -275,7 +285,7 @@ class DirectVideoManager {
                 logger.log(`Calling DirectVideo.nz(${streamId}) for ${kind}...`);
                 const handle = mod.nz(streamId);
                 if (handle?.stream && hasVideoTracks(handle.stream)) {
-                    const stream = handle.stream;
+                    const { stream } = handle;
                     (stream as any).__discordStreamId = streamId;
 
                     const release = () => {
@@ -339,6 +349,9 @@ let isScreenSharingActive = false;
 let isCameraActive = false;
 let ownScreenshareStreamId: string | number | null = null;
 let ownCameraStreamId: string | number | null = null;
+
+/** Latest resolution/frame-rate selected in Discord's Go Live dialog. */
+let requestedScreenQuality: StreamQuality | null = null;
 
 function hasVideoTracks(val: any): boolean {
     if (!val) return false;
@@ -404,7 +417,13 @@ async function onDesktopStreamAcquired(stream: MediaStream, sourceHint: string, 
     };
 
     originalTrack.addEventListener("ended", cleanup, { once: true });
-    await publisherManager.start("scrn", originalTrack, actualStreamId);
+    const actualQuality = qualityFromTrack(originalTrack);
+    const quality = mergeQuality(requestedScreenQuality, actualQuality);
+    logger.log(
+        `Desktop quality target: ${quality.height ?? "?"}p @ ${quality.frameRate ?? "?"}fps ` +
+        `(capture ${actualQuality.width ?? "?"}x${actualQuality.height ?? "?"} @ ${actualQuality.frameRate ?? "?"}fps).`
+    );
+    await publisherManager.start("scrn", originalTrack, actualStreamId, quality);
 }
 
 async function onCameraStreamAcquired(stream: MediaStream, sourceHint: string, streamId?: string | number): Promise<void> {
@@ -435,7 +454,7 @@ async function onCameraStreamAcquired(stream: MediaStream, sourceHint: string, s
     };
 
     originalTrack.addEventListener("ended", cleanup, { once: true });
-    await publisherManager.start("cam", originalTrack, actualStreamId);
+    await publisherManager.start("cam", originalTrack, actualStreamId, qualityFromTrack(originalTrack));
 }
 
 function acquireStreamForKind(streamId: string | number, kind: StreamKind, retryCount = 0): void {
@@ -471,12 +490,14 @@ async function handleGoLiveSourceChange(sourceConfig: any): Promise<void> {
         isScreenSharingActive = false;
         ownScreenshareStreamId = null;
         currentDesktopTrack = null;
+        requestedScreenQuality = null;
         directVideoManager.releaseDesktop();
         await publisherManager.stop("scrn");
         return;
     }
 
     isScreenSharingActive = true;
+    requestedScreenQuality = qualityFromGoLiveSource(sourceConfig) ?? requestedScreenQuality;
     logger.log("Screen sharing initiated with config:", sourceConfig);
 
     if (publisherManager.isCurrent("scrn", ownScreenshareStreamId ?? undefined)) return;
@@ -490,7 +511,9 @@ async function handleGoLiveSourceChange(sourceConfig: any): Promise<void> {
     // 2. Fallback for Vesktop/Web: getDisplayMedia or chromeMediaSource
     if (typeof navigator !== "undefined" && navigator.mediaDevices) {
         const sourceId = extractDesktopSourceId(sourceConfig);
+        const requested = requestedScreenQuality ?? {};
         let stream: MediaStream | null = null;
+
         if (sourceId && typeof navigator.mediaDevices.getUserMedia === "function") {
             try {
                 stream = await navigator.mediaDevices.getUserMedia({
@@ -500,7 +523,8 @@ async function handleGoLiveSourceChange(sourceConfig: any): Promise<void> {
                             chromeMediaSource: "desktop",
                             chromeMediaSourceId: sourceId,
                             maxWidth: 3840,
-                            maxHeight: 2160
+                            maxHeight: requested.height ?? 2160,
+                            maxFrameRate: requested.frameRate ?? 60
                         }
                     } as any
                 });
@@ -511,11 +535,15 @@ async function handleGoLiveSourceChange(sourceConfig: any): Promise<void> {
 
         if (!stream && typeof navigator.mediaDevices.getDisplayMedia === "function") {
             try {
+                // Mirror Discord's Go Live quality instead of forcing 1080p30.
+                const video: MediaTrackConstraints = {};
+                if (requested.height != null) video.height = { max: requested.height };
+                if (requested.frameRate != null) {
+                    video.frameRate = { ideal: requested.frameRate, max: requested.frameRate };
+                }
+
                 stream = await navigator.mediaDevices.getDisplayMedia({
-                    video: {
-                        frameRate: sourceConfig?.qualityOptions?.fps || sourceConfig?.quality?.frameRate || 30,
-                        height: sourceConfig?.qualityOptions?.resolution || sourceConfig?.quality?.resolution || 1080
-                    },
+                    video: Object.keys(video).length > 0 ? video : true,
                     audio: false
                 });
             } catch {}
@@ -762,7 +790,11 @@ function installMediaDevicesHooks(): void {
                     logger.log(`getUserMedia video track acquired for ${kind}: id=${original.id}`);
                     const clone = original.clone();
                     bindTrackTeardown(original, clone, kind);
-                    publisherManager.start(kind, clone);
+                    const quality = mergeQuality(
+                        kind === "scrn" ? requestedScreenQuality : null,
+                        qualityFromTrack(clone)
+                    );
+                    publisherManager.start(kind, clone, undefined, quality);
                 }
                 return stream;
             };
@@ -778,7 +810,12 @@ function installMediaDevicesHooks(): void {
                     logger.log(`getDisplayMedia video track acquired: id=${original.id}`);
                     const clone = original.clone();
                     bindTrackTeardown(original, clone, "scrn");
-                    publisherManager.start("scrn", clone);
+                    publisherManager.start(
+                        "scrn",
+                        clone,
+                        undefined,
+                        mergeQuality(requestedScreenQuality, qualityFromTrack(clone))
+                    );
                 }
                 return stream;
             };

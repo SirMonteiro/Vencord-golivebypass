@@ -1,14 +1,15 @@
 /*
  * Vencord, a Discord client mod
+ * Copyright (c) 2026 Gabriel Monteiro de Souza
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { ApplicationStreamingStore, PopoutWindowStore, UserStore, VoiceStateStore } from "@webpack/common";
 import { Logger } from "@utils/Logger";
+import { ApplicationStreamingStore, PopoutWindowStore, UserStore, VoiceStateStore } from "@webpack/common";
 
+import { StreamKind } from "./types";
 import { VideoHook } from "./VideoHook";
 import { whepSubscriptionManager } from "./WhepSubscriptionManager";
-import { StreamKind } from "./types";
 
 const logger = new Logger("WhipRelay:Watcher", "#e5a00d");
 

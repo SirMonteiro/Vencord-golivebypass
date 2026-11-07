@@ -1,9 +1,11 @@
 /*
  * Vencord, a Discord client mod
+ * Copyright (c) 2026 Gabriel Monteiro de Souza
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 import { Logger } from "@utils/Logger";
+
 import { StreamKind, SubscriptionState, WhipSession } from "./types";
 import { subscribe } from "./whip";
 

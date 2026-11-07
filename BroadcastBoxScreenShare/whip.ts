@@ -1,9 +1,14 @@
 /*
  * Vencord, a Discord client mod
+ * Copyright (c) 2026 Gabriel Monteiro de Souza
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 import { Logger } from "@utils/Logger";
+
+import { getDiscordEncodeCodecs, orderVideoCodecsLikeDiscord } from "./discordCodecs";
+import { applySenderQuality } from "./senderQuality";
+import { StreamQuality } from "./streamQuality";
 import { WhipSession } from "./types";
 
 const logger = new Logger("WhipRelay:WebRTC", "#e5a00d");
@@ -198,7 +203,8 @@ export async function publish(
     token: string,
     track: MediaStreamTrack,
     onCreated?: (pc: RTCPeerConnection) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    quality?: StreamQuality | null
 ): Promise<WhipSession> {
     if (signal?.aborted) {
         throw new DOMException("Aborted", "AbortError");
@@ -288,7 +294,7 @@ export async function publish(
 
     // Explicit sendonly video-only transceiver — correct WHIP semantics.
     const transceiver = pc.addTransceiver(track, { direction: "sendonly" });
-    applyCodecPreferences(transceiver, "WHIP");
+    await applyCodecPreferences(transceiver, "WHIP");
 
     logger.debug(`[WHIP] [${token}] Creating SDP offer...`);
     const offer = await pc.createOffer();
@@ -298,6 +304,9 @@ export async function publish(
     const { sdp, location } = await postSdp(whipUrl, pc.localDescription!.sdp, token, "WHIP", signal);
     logger.debug(`[WHIP] [${token}] Applying remote SDP answer...`);
     await pc.setRemoteDescription({ type: "answer", sdp });
+
+    // Align the outgoing encoding with Discord's Go Live quality choice.
+    await applySenderQuality(transceiver.sender, track, quality);
 
     const resourceUrl = resolveUrl(whipUrl, location);
     if (resourceUrl) {
@@ -324,39 +333,38 @@ export async function publish(
 }
 
 /**
- * Prioritizes codecs according to: AV1 -> HEVC -> VP9 -> VP8 -> H264 -> RTX -> others.
+ * Applies Discord-compatible codec ordering.
+ *
+ * The browser exposes every codec it can decode, but Discord's native Go Live
+ * encoder chooses H264 first and VP8 as the compatibility fallback. We mirror
+ * that order (and use Discord's own encode-capability report when available)
+ * instead of forcing AV1, which neither Discord's official path nor Broadcast
+ * Box handles reliably.
  */
-function applyCodecPreferences(transceiver: RTCRtpTransceiver, protocol: "WHIP" | "WHEP"): void {
+async function applyCodecPreferences(
+    transceiver: RTCRtpTransceiver,
+    protocol: "WHIP" | "WHEP"
+): Promise<void> {
     if (typeof transceiver.setCodecPreferences !== "function") return;
-    if (typeof RTCRtpReceiver.getCapabilities !== "function") return;
+
+    const senderCaps = typeof RTCRtpSender.getCapabilities === "function"
+        ? RTCRtpSender.getCapabilities("video")
+        : null;
+    const receiverCaps = typeof RTCRtpReceiver.getCapabilities === "function"
+        ? RTCRtpReceiver.getCapabilities("video")
+        : null;
+
+    const capabilities = (protocol === "WHIP" ? senderCaps : receiverCaps) ?? receiverCaps ?? senderCaps;
+    if (!capabilities?.codecs?.length) return;
 
     try {
-        const caps = RTCRtpReceiver.getCapabilities("video");
-        if (!caps?.codecs?.length) return;
+        const discordCodecs = await getDiscordEncodeCodecs();
+        const ordered = orderVideoCodecsLikeDiscord(capabilities.codecs, discordCodecs);
 
-        const priority = [
-            "video/av1",
-            "video/av01",
-            "video/h265",
-            "video/hevc",
-            "video/vp9",
-            "video/vp8",
-            "video/h264",
-            "video/rtx"
-        ];
-
-        const sorted = [...caps.codecs].sort((a, b) => {
-            const mimeA = a.mimeType.toLowerCase();
-            const mimeB = b.mimeType.toLowerCase();
-            const indexA = priority.indexOf(mimeA);
-            const indexB = priority.indexOf(mimeB);
-            const rankA = indexA === -1 ? priority.length : indexA;
-            const rankB = indexB === -1 ? priority.length : indexB;
-            return rankA - rankB;
-        });
-
-        transceiver.setCodecPreferences(sorted);
-        logger.debug(`[${protocol}] Configured codec preferences (AV1 -> HEVC -> VP9 -> VP8 -> H264 -> RTX -> others): ${sorted.map(c => c.mimeType).join(", ")}`);
+        transceiver.setCodecPreferences(ordered);
+        logger.debug(
+            `[${protocol}] Configured Discord-style codec order: ${ordered.map(codec => codec.mimeType).join(", ")}`
+        );
     } catch (err) {
         logger.warn(`[${protocol}] Failed to set codec preferences:`, err);
     }
@@ -404,7 +412,7 @@ export async function subscribe(
 
     // Recvonly video transceiver — we only want to receive, not send.
     const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
-    applyCodecPreferences(transceiver, "WHEP");
+    await applyCodecPreferences(transceiver, "WHEP");
 
     pc.ontrack = e => {
         logger.log(`[WHEP] [${token}] Remote track received: kind=${e.track.kind}, id=${e.track.id}`);

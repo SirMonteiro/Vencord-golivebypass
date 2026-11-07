@@ -1,7 +1,10 @@
 /*
  * Vencord, a Discord client mod
+ * Copyright (c) 2026 Gabriel Monteiro de Souza
  * SPDX-License-Identifier: GPL-3.0-or-later
- *
+ */
+
+/*
  * CSP policy for the Broadcast Box server.
  *
  * NOTE: `baseUrl` in the plugin settings is dynamic, but CSP is registered at
