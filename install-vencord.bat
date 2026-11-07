@@ -10,7 +10,16 @@ if not exist "%SCRIPT%" (
     exit /b 1
 )
 
-echo Starting Vencord + GoLiveBypass Setup...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
+echo Starting Vencord + GoLiveBypass setup...
+echo Usage: install-vencord.bat [-Target Discord^|Vesktop^|Both] [-Uninstall]
 echo.
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
+set "EXITCODE=%ERRORLEVEL%"
+
+echo.
+if not "%EXITCODE%"=="0" (
+    echo [ERROR] Setup failed with exit code %EXITCODE%.
+)
 pause
+exit /b %EXITCODE%

@@ -15,6 +15,7 @@ permissions:
 
 env:
   FORCE_COLOR: true
+  # Baked into the build so its built-in updater targets this repository.
   VENCORD_REMOTE: ${{ github.repository }}
 
 jobs:
@@ -22,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check upstream Vencord commit
+      - name: Check for upstream or custom changes
         id: check
         run: |
           UPSTREAM_SHA=$(git ls-remote https://github.com/Vendicated/Vencord.git HEAD | cut -f1)
@@ -30,20 +31,33 @@ jobs:
             echo "Error: Could not retrieve upstream commit hash."
             exit 1
           fi
-          echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
-          echo "short_sha=${UPSTREAM_SHA:0:7}" >> $GITHUB_OUTPUT
 
-          RELEASE_SHA=$(gh release view devbuild --repo "${{ github.repository }}" --json body --jq .body 2>/dev/null | grep -oE '[a-f0-9]{40}' | head -n1 || echo "")
+          CUSTOM_SHA="${{ github.sha }}"
+
+          # Deterministic build id. It changes when either upstream Vencord moves
+          # (new code) or this repository moves (new plugin / workflow changes), so
+          # installed clients always detect both kinds of updates.
+          VENCORD_HASH=$(printf '%s\n%s\n' "$UPSTREAM_SHA" "$CUSTOM_SHA" | sha1sum | cut -c1-7)
+
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "custom_sha=$CUSTOM_SHA" >> "$GITHUB_OUTPUT"
+          echo "vencord_hash=$VENCORD_HASH" >> "$GITHUB_OUTPUT"
+          echo "VENCORD_HASH=$VENCORD_HASH" >> "$GITHUB_ENV"
+
+          RELEASE_HASH=$(gh release view devbuild --repo "${{ github.repository }}" --json body --jq .body 2>/dev/null \
+            | grep -oE 'Vencord hash: [a-f0-9]{7}' | awk '{print $3}' | head -n1 || echo "")
 
           echo "Upstream commit: $UPSTREAM_SHA"
-          echo "Current release commit: $RELEASE_SHA"
+          echo "Custom commit:   $CUSTOM_SHA"
+          echo "Build hash:      $VENCORD_HASH"
+          echo "Released hash:   ${RELEASE_HASH:-none}"
 
-          if [ "$UPSTREAM_SHA" = "$RELEASE_SHA" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            echo "Upstream has not changed. Skipping build."
-            echo "should_build=false" >> $GITHUB_OUTPUT
+          if [ "$VENCORD_HASH" = "$RELEASE_HASH" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Nothing changed since the last release. Skipping build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
           else
-            echo "New commit or manual trigger detected. Proceeding to build."
-            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "New upstream or custom change detected. Proceeding to build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,17 +68,27 @@ jobs:
         with:
           repository: Vendicated/Vencord
 
-      - name: Checkout repository
+      - name: Checkout this repository (custom plugins + CI scripts)
         if: steps.check.outputs.should_build == 'true'
         uses: actions/checkout@v7
         with:
           path: custom
 
-      - name: Inject repo custom plugin
+      - name: Patch updater to target this repository
+        if: steps.check.outputs.should_build == 'true'
+        run: node custom/.github/scripts/patch-updater.mjs
+
+      - name: Inject custom userplugins
         if: steps.check.outputs.should_build == 'true'
         run: |
-          mkdir -p src/userplugins/
-          find custom -mindepth 1 -maxdepth 1 -type d -exec sh -c 'find "$1" -type f \( -name "*.ts" -o -name "*.tsx" \) | grep -q . && cp -r -t "$1" src/userplugins/' _ {} \;
+          mkdir -p src/userplugins
+          for dir in custom/*/; do
+            [ -d "$dir" ] || continue
+            if find "$dir" -type f \( -name '*.ts' -o -name '*.tsx' \) | grep -q .; then
+              echo "Injecting $dir"
+              cp -r "$dir" src/userplugins/
+            fi
+          done
           rm -rf custom
 
       - name: Setup pnpm
@@ -77,14 +101,12 @@ jobs:
       - name: Setup interactive ssh session
         uses: Warpbuilds/action-debugger@v2
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
-        with:
-          limit-access-to-actor: true
 
       - name: Build web
         if: steps.check.outputs.should_build == 'true'
         run: pnpm buildWebStandalone
 
-      - name: Build
+      - name: Build desktop / Discord
         if: steps.check.outputs.should_build == 'true'
         run: pnpm build --standalone
 
@@ -95,28 +117,28 @@ jobs:
       - name: Clean up obsolete files
         if: steps.check.outputs.should_build == 'true'
         run: |
-          rm -rf dist/*-unpacked dist/vendor Vencord.user.css vencordDesktopRenderer.css vencordDesktopRenderer.css.map
-
-      - name: Preliminar cleanup
-        if: steps.check.outputs.should_build == 'true'
-        run: |
-          find dist/ -name "*.map" -delete
+          rm -rf dist/*-unpacked dist/vendor
+          find dist -name '*.map' -delete
 
       - name: Publish DevBuild release
         if: steps.check.outputs.should_build == 'true'
         run: |
           UPSTREAM_SHA="${{ steps.check.outputs.upstream_sha }}"
-          RELEASE_TAG="$(git rev-parse --short HEAD)"
+          CUSTOM_SHA="${{ steps.check.outputs.custom_sha }}"
+          VENCORD_HASH="${{ steps.check.outputs.vencord_hash }}"
 
-          # Delete the existing devbuild release and tag to ensure strictly one release exists
+          # Keep exactly one release so /releases/latest always points at the newest build.
           if gh release view devbuild --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release delete devbuild --repo "${{ github.repository }}" --yes --cleanup-tag
           fi
 
-          # Upload individual dist/* artifacts matching the official Vencord file structure
+          NOTES="Official Vencord commit: $UPSTREAM_SHA"
+          NOTES="${NOTES}"$'\n'"Custom repo commit: $CUSTOM_SHA"
+          NOTES="${NOTES}"$'\n'"Vencord hash: $VENCORD_HASH"
+
           gh release create devbuild dist/* \
             --repo "${{ github.repository }}" \
-            --title "DevBuild $RELEASE_TAG" \
-            --notes "Official Vencord commit: $UPSTREAM_SHA" \
+            --title "DevBuild $VENCORD_HASH" \
+            --notes "$NOTES"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
