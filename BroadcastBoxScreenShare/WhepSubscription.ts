@@ -166,6 +166,14 @@ export class WhepSubscription {
         }
     }
 
+    /**
+     * Guards async callbacks: true when this connection attempt was superseded
+     * by a newer one or the subscription has been torn down.
+     */
+    private isStale(gen: number): boolean {
+        return this.state === "closed" || gen !== this.connectionGen;
+    }
+
     private scheduleOrphanGraceTimer(): void {
         if (this.orphanTimer != null || this.state === "closed") return;
         logger.debug(`[${this.token}] No elements attached. Starting ${ORPHAN_GRACE_PERIOD_MS}ms orphan grace timer.`);
@@ -206,7 +214,7 @@ export class WhepSubscription {
         this.mediaStream = null;
         this.activeTrack = null;
 
-        if (this.state === "closed" || gen !== this.connectionGen) return;
+        if (this.isStale(gen)) return;
 
         this.state = "connecting";
         const whepUrl = `${this.baseUrl}/api/whep`;
@@ -217,7 +225,7 @@ export class WhepSubscription {
                 whepUrl,
                 this.token,
                 (stream, track) => {
-                    if (this.state === "closed" || gen !== this.connectionGen) return;
+                    if (this.isStale(gen)) return;
                     if (track.kind !== "video") return;
 
                     logger.log(`[WHEP] [${this.token}] Video track ready (id: ${track.id}, state: ${track.readyState})`);
@@ -235,7 +243,7 @@ export class WhepSubscription {
                     }
 
                     track.addEventListener("ended", () => {
-                        if (this.state === "closed" || gen !== this.connectionGen) return;
+                        if (this.isStale(gen)) return;
                         logger.log(`[WHEP] [${this.token}] Track ended. Attempting reconnect...`);
                         this.mediaStream = null;
                         this.activeTrack = null;
@@ -245,7 +253,7 @@ export class WhepSubscription {
                 this.abortController.signal
             );
 
-            if (this.state === "closed" || gen !== this.connectionGen) {
+            if (this.isStale(gen)) {
                 session.close().catch(() => {});
                 return;
             }
@@ -253,7 +261,7 @@ export class WhepSubscription {
             this.session = session;
 
             session.pc.addEventListener("connectionstatechange", () => {
-                if (this.state === "closed" || gen !== this.connectionGen) return;
+                if (this.isStale(gen)) return;
                 const cs = session.pc.connectionState;
                 logger.debug(`[WHEP] [${this.token}] Connection state: ${cs}`);
                 if (cs === "failed" || cs === "closed") {
@@ -276,7 +284,7 @@ export class WhepSubscription {
                 return;
             }
             logger.warn(`[WHEP] [${this.token}] Subscription failed:`, err);
-            if (this.state !== "closed" && gen === this.connectionGen) {
+            if (!this.isStale(gen)) {
                 this.scheduleRetry();
             }
         }
