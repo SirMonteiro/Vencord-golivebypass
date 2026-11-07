@@ -63,6 +63,12 @@ export function getDiscordEncodeCodecs(): Promise<string[] | null> {
 
             engine.getCodecCapabilities(json => {
                 window.clearTimeout(timer);
+                if (!json || json.trim().length === 0) {
+                    // Older/newer Discord builds may expose the bridge without
+                    // returning a payload; the static priority order is enough.
+                    finish(null);
+                    return;
+                }
                 try {
                     const capabilities = JSON.parse(json) as Array<{ name?: string; encode?: boolean; }>;
                     const names = capabilities
@@ -77,7 +83,7 @@ export function getDiscordEncodeCodecs(): Promise<string[] | null> {
                     logger.debug("Discord reports encodable video codecs:", names.join(", "));
                     finish(names);
                 } catch (err) {
-                    logger.warn("Could not parse Discord codec capabilities:", err);
+                    logger.debug("Discord codec capabilities were not JSON; using static order.", err);
                     finish(null);
                 }
             });
