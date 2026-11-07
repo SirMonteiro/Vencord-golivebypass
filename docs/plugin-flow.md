@@ -127,16 +127,29 @@ Session arbitration in `PublisherManager.start`:
 
 ### 2.5 Codec policy
 
-Discord's native stream encoder defaults to H264 and falls back to VP8. The
-plugin mirrors that:
+The codec module probes the platform before choosing an order:
 
-1. Ask Discord's media engine for encodable codecs (500 ms timeout).
-2. If available, drop codecs Discord cannot encode.
-3. Sort remaining codecs as `H264 → VP8 → VP9 → AV1 → H265/HEVC → utility`.
-4. Keep each RTX codec immediately after its base codec.
-5. If the native bridge returns nothing, use the same static priority list.
+1. `navigator.mediaCapabilities.encodingInfo` reports `supported` and
+   `powerEfficient` (hardware acceleration) for VP9, H265, VP8, H264 and AV1.
+2. If MediaCapabilities is unavailable, Discord's `getCodecCapabilities` list is
+   used.
+3. If both are unavailable, the static order is used with AV1 last.
 
-This is why AV1 is no longer first. AV1 remains only as a last-resort fallback.
+Ordering:
+
+- VP9 hardware accelerated → `VP9 → H265 → VP8 → H264 → AV1`.
+- Otherwise → promote the first supported codec in
+  `VP9 → H265 → VP8 → H264 → AV1`; AV1 stays last.
+- `forceAv1First` (experimental setting, off by default) → `AV1` first.
+
+Each RTX codec stays immediately after its base codec. Codecs the platform
+cannot encode are dropped. This is why AV1 is no longer first by default.
+
+During the codec probe the plugin logs:
+
+```text
+[WhipRelay:Codecs] Codec policy (media-capabilities): supported=VP9,VP8,H264,AV1, vp9Hardware=false, priority=VP9 > H265 > VP8 > H264 > AV1
+```
 
 ### 2.6 Sender quality
 

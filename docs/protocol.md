@@ -106,20 +106,29 @@ const ICE_SERVERS = [
 ## 6. Codec negotiation
 
 Broadcast Box (Pion) supports H264, VP8, VP9 and AV1 depending on its build.
-Discord's native stream encoder uses H264 by default with VP8 as the fallback.
-The plugin therefore orders codecs as:
+The plugin resolves its codec order at publish/subscribe time:
 
-```text
-H264 (all profiles) → VP8 → RTX → VP9 → AV1 → H265/HEVC → red/ulpfec/flexfec
-```
+1. **MediaCapabilities probe** (`type: "webrtc"`) for VP9, H265, VP8, H264 and
+   AV1. `powerEfficient` tells whether the codec is hardware accelerated.
+2. **Discord capability list** if MediaCapabilities is unavailable.
+3. **Static order** if both are unavailable.
 
-`discordCodecs.ts` first asks Discord's media engine which codecs it can encode.
-If that returns a usable list, codecs Discord cannot encode are removed. If the
-native bridge returns nothing, the static order above is used. AV1 is never
-first.
+Policy:
 
-The receiver side (WHEP) uses the receiver capabilities with the same ordering;
-the final codec is still whatever Broadcast Box negotiates.
+| Condition | Order |
+| --- | --- |
+| VP9 hardware accelerated | `VP9 → H265 → VP8 → H264 → AV1` |
+| No VP9 hardware | Promote the first supported codec in `VP9 → H265 → VP8 → H264 → AV1`; AV1 last |
+| `forceAv1First` setting | `AV1 → VP9 → H265 → VP8 → H264` |
+
+Codecs the platform cannot encode are removed. RTX stays adjacent to its base
+codec. AV1 is never first unless the experimental setting is enabled.
+
+The final codec is still whatever Broadcast Box negotiates from this offer; the
+order only expresses preference.
+
+The receiver side (WHEP) uses the receiver capabilities with the same policy;
+the final playback codec is selected by the server's offer/answer.
 
 ## 7. Resolution and frame rate
 

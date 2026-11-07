@@ -25,13 +25,18 @@ definePluginSettings({
         type: OptionType.STRING,
         description: "Broadcast Box base URL (no trailing slash)",
         default: "https://stream.gabrielsouza.top"
+    },
+    forceAv1First: {
+        type: OptionType.BOOLEAN,
+        description: "Experimental: force AV1 to the front of codec negotiation (off by default)",
+        default: false
     }
 });
 ```
 
 `baseUrl` is read through a getter when creating subscriptions and publishers so
-a settings edit applies to new sessions without a restart. The CSP host in
-`native.ts` is **not** dynamic.
+a settings edit applies to new sessions without a restart. `forceAv1First` is
+experimental and off by default. The CSP host in `native.ts` is **not** dynamic.
 
 ### `class PublisherManager`
 
@@ -49,7 +54,7 @@ Owns the publishing lifecycle for `scrn` and `cam`.
 | --- | --- |
 | `isCurrent(kind, streamId?, trackId?)` | True when a session/pending session exists and the provided IDs match. Used to ignore duplicate acquisition callbacks. |
 | `isBusy(kind)` | `active` or `pending` exists. |
-| `start(kind, track, streamId?, quality?)` | If connected and only the track changed, `replaceTrack` + sender quality. Otherwise abort pending, stop active, build token `<userId>-<kind>`, call `publish`, register the session. |
+| `start(kind, track, streamId?, quality?)` | If connected and only the track changed, `replaceTrack` + sender quality. Otherwise abort pending, stop active, build token `<userId>-<kind>`, call `publish` (including `forceAv1First` from settings), register the session. |
 | `stop(kind)` | Abort pending, clear IDs, close the active session. |
 | `stopAll()` | Stops both kinds. |
 
@@ -144,13 +149,24 @@ Protocol primitives. It has no Discord dependency.
 | `applyCodecPreferences(transceiver, protocol)` | Async; picks sender or receiver capabilities, asks `discordCodecs` for the order, calls `setCodecPreferences`. |
 | `subscribe(...)` | Full WHEP subscribe. See below. |
 
-### `publish(whipUrl, token, track, onCreated?, signal?, quality?)`
+### `publish(whipUrl, token, track, options?)`
+
+`PublishOptions`:
+
+| Option | Meaning |
+| --- | --- |
+| `onCreated` | Called with the peer connection immediately after creation. |
+| `signal` | Abort signal for the whole negotiation. |
+| `quality` | Discord Go Live `StreamQuality` to mirror on the sender. |
+| `forceAv1First` | Experimental codec override (off by default). |
+
+Steps:
 
 1. Logs track kind/id/label/readyState and `getSettings()`.
 2. Deletes a previously saved session for the same token (stale slot cleanup).
 3. Creates `RTCPeerConnection` with `bundlePolicy: "max-bundle"`.
 4. Adds a **sendonly** video transceiver.
-5. Applies Discord-style codec preferences.
+5. Resolves the codec policy and applies it.
 6. Creates the offer, sets the local description, waits for ICE (1.5 s cap).
 7. POSTs the offer; applies the answer.
 8. Applies `quality` to the sender via `applySenderQuality`.
@@ -290,14 +306,38 @@ changed, update this constant and restart the client.
 
 ## `discordCodecs.ts`
 
-Pure codec policy + one native capability probe.
+Codec policy: platform probing, priority building and capability ordering.
+
+### Constants
+
+| Name | Behavior |
+| --- | --- |
+| `BASE_CODEC_ORDER` | `VP9 → H265 → VP8 → H264 → AV1`. |
+| `UTILITY_CODECS` | `RTX`, `RED`, `ULPFEC`, `FLEXFEC`, `FLEXFEC-03`; always kept after real codecs. |
+| `CODEC_CONTENT_TYPES` | Maps codec names to `MediaCapabilities` MIME types (`video/VP9`, ...). |
+
+### Functions
 
 | Symbol | Behavior |
 | --- | --- |
-| `DISCORD_CODEC_PRIORITY` | `H264 → VP8 → VP9 → AV1 → H265 → HEVC`. |
-| `getDiscordEncodeCodecs()` | Calls `MediaEngineStore.getMediaEngine().getCodecCapabilities(cb)` with a 500 ms timeout; parses the JSON array and returns encodable names, or `null`. Cached. |
+| `getDiscordEncodeCodecs()` | Calls `MediaEngineStore.getMediaEngine().getCodecCapabilities(cb)` with a 500 ms timeout, parses the JSON array and returns encodable names, or `null`. Cached. |
+| `probeCodec(name, quality)` | `navigator.mediaCapabilities.encodingInfo({ type: "webrtc", video: ... })` for one codec. Returns `supported`, `smooth`, `powerEfficient`. |
+| `probeAllCodecs(quality)` | Probes every `BASE_CODEC_ORDER` codec in parallel. |
+| `resolveCodecPolicy({ quality, forceAv1First })` | Chooses the effective policy. Priority: MediaCapabilities probe → Discord's encode list → static order. |
 | `groupCodecs(caps)` | Groups each base codec with the RTX entries that follow it. |
-| `orderVideoCodecsLikeDiscord(caps, discordCodecs)` | Drops codecs Discord cannot encode (when the probe succeeded), sorts by the priority list, keeps RTX adjacent, and falls back to the original list if filtering removes everything. |
+| `orderVideoCodecs(caps, policy)` | Drops codecs outside `policy.allowed` (keeping utility codecs), sorts by `policy.priority`, keeps RTX adjacent, and falls back to the original list if filtering removes everything. |
+
+### Policy rules
+
+1. If `forceAv1First` is enabled: `AV1 → VP9 → H265 → VP8 → H264`.
+2. Else if VP9 encoding is hardware-accelerated (`powerEfficient === true`):
+   `VP9 → H265 → VP8 → H264 → AV1`.
+3. Else: promote the first supported codec in `VP9 → H265 → VP8 → H264 → AV1`
+   and keep the remaining supported codecs as fallbacks.
+4. AV1 is always moved to the end unless `forceAv1First` is enabled.
+
+`resolveCodecPolicy` logs the chosen source, VP9 hardware flag and final order at
+debug level.
 
 ## `streamQuality.ts`
 

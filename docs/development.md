@@ -133,7 +133,7 @@ When the user starts a screen share, the plugin logs:
 [WHIP] Initializing publish session for token "<userId>-scrn"
 [WHIP] Track settings: <width>x<height> @ <fps>
 Applied sender quality target <height>p @ <fps>fps (capture ...)
-[WHIP] Configured Discord-style codec order: video/H264, video/VP8, ...
+[WHIP] Configured codec order (media-capabilities, vp9Hardware=false): video/VP9, video/VP8, video/H264, video/AV1, ...
 [WHIP] PeerConnection connectionState: connected
 ```
 

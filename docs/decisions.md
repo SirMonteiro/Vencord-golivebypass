@@ -59,28 +59,36 @@ affect the original), canvas re-encode (CPU cost, extra failure mode).
 
 ---
 
-## ADR-004: Mirror Discord's codec order instead of forcing AV1
+## ADR-004: Platform-aware codec order with VP9 hardware detection
 
 **Status:** accepted (2026-11-07)
 
-**Context:** The previous implementation explicitly preferred AV1, then HEVC,
-VP9, VP8, H264. Broadcast Box and most WebRTC decoders are more reliable with
-H264/VP8, and Discord's native stream encoder defaults to H264 with VP8 as the
-fallback.
+**Context:** The previous implementation explicitly preferred AV1, which
+Broadcast Box and most WebRTC decoders handle poorly. The maintainer wants VP9
+when it is hardware accelerated, otherwise the first codec the platform
+supports, and AV1 only as a last resort.
 
 **Decision:**
 
-1. Query Discord's media engine for encodable codecs (500 ms timeout).
-2. Drop codecs Discord cannot encode.
-3. Order as `H264 → VP8 → VP9 → AV1 → H265/HEVC → utility`.
-4. Keep RTX adjacent to its base codec.
-5. Fall back to the same static order when the probe returns nothing.
+1. Probe `navigator.mediaCapabilities.encodingInfo({ type: "webrtc" })` for VP9,
+   H265, VP8, H264 and AV1. `powerEfficient` identifies hardware acceleration.
+2. If MediaCapabilities is unavailable, use Discord's
+   `getCodecCapabilities` list (500 ms timeout).
+3. If both are unavailable, use the static order with AV1 last.
+4. Priority:
+   - VP9 hardware accelerated → `VP9 → H265 → VP8 → H264 → AV1`.
+   - Otherwise → promote the first supported codec in
+     `VP9 → H265 → VP8 → H264 → AV1`.
+   - `forceAv1First` (off by default) → `AV1` first.
+5. Drop codecs the platform cannot encode; keep RTX adjacent to its base codec.
 
-**Consequences:** AV1 is no longer prioritized. It remains a last-resort
-fallback. The stream is more likely to negotiate the same codec Discord would
-have used.
+**Consequences:** AV1 is never first unless the experimental setting is enabled.
+VP9 software encoding may be chosen on machines without hardware VP9 because it
+is the first supported codec in the requested list. H265 is usually not
+supported by browsers today and is filtered out.
 
-**Open:** whether AV1 should be removed entirely (see below).
+**Open:** whether the "first supported" fallback should consider only
+hardware-accelerated codecs; see below.
 
 ---
 
@@ -150,17 +158,18 @@ alone, after editing the plugin.
 
 These need a product/architecture decision from the maintainer.
 
-### Q1. Should AV1 be disabled entirely?
+### Q1. Does "first supported" mean hardware-supported?
 
-Current behavior: `H264 → VP8 → VP9 → AV1` (AV1 last resort).
+Resolved: AV1 is last resort and `forceAv1First` is an experimental setting,
+off by default. One ambiguity remains:
 
-Options:
+- Current behavior: if VP9 is not hardware accelerated, promote the first
+  codec **the platform supports** (including software VP9).
+- Alternative: promote the first codec **with hardware acceleration**; if none,
+  fall back to `VP8 → H264`.
 
-- **A. Keep AV1 last** (current). Maximum compatibility fallback.
-- **B. Allow only H264/VP8**. Closest to Discord's documented stream codecs;
-  no risk of an AV1 negotiation Broadcast Box mishandles.
-- **C. Add a setting** (`allowAv1`, default off). Requires a settings entry and a
-  re-negotiation path.
+This only matters on machines where VP9 is software-only. Confirm which reading
+is intended.
 
 ### Q2. Should the plugin add a TURN option?
 
@@ -169,20 +178,17 @@ TURN URL/credential setting is needed.
 
 ### Q3. How should the PiP black-screen issue be fixed?
 
-Current behavior: `VideoHook` only reliably covers the main tile. Options:
+Chosen approach: **A + B**.
 
-- **A. Extend `StreamWatcher` discovery** to PiP containers and re-attach on DOM
-  replacement.
-- **B. Re-apply the hook on every mutation** for the active PiP element.
-- **C. Replace the PiP surface with a canvas/`captureStream` renderer** (larger
-  change, more CPU).
+- Extend `StreamWatcher` discovery to PiP containers.
+- Re-apply the active hook on DOM mutations when the element is replaced.
+- Keep the existing `VideoHook` contract; no canvas re-encode.
 
-Recommended: A + B, keeping the existing `VideoHook` contract.
+Implementation is deferred until the initial compile/publisher fix is approved.
 
 ### Q4. Documentation language
 
-This documentation is written in English to match the code and Vencord upstream.
-If Portuguese is preferred, the files can be translated.
+Resolved: English, matching the code and Vencord upstream.
 
 ### Q5. Audio in the Broadcast Box feed
 
